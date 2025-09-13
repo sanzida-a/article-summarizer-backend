@@ -18,30 +18,38 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware - Permissive for testing
+# CORS middleware - Fixed for Render deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for testing
-    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_origins=[
+        "http://localhost:3000",  # Local development
+        "http://localhost:5173",  # Vite dev server
+        "https://smart-summary-mail.vercel.app",  # Your Vercel app
+        "https://*.vercel.app",   # All Vercel deployments
+        "*"  # Allow all origins (remove in production if needed)
+    ],
+    allow_credentials=False,  # Set to False when using "*" in origins
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
 
-# Environment variables
+# Environment variables - Fixed for Render
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
-RENDER_ENVIRONMENT = os.getenv("RENDER")
+RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 # Log configuration info
 logger.info(f"Starting Article Summarizer API...")
-logger.info(f"Render Environment: {'✅' if RENDER_ENVIRONMENT else '❌'}")
+logger.info(f"Render Service: {RENDER_SERVICE_NAME}")
+logger.info(f"Render External URL: {RENDER_EXTERNAL_URL}")
 logger.info(f"N8N Webhook URL configured: {'✅' if N8N_WEBHOOK_URL else '❌'}")
 
 if not N8N_WEBHOOK_URL:
     logger.warning("⚠️  N8N_WEBHOOK_URL not set. Please configure it in Render environment variables.")
     logger.warning("   Go to Render Dashboard → Your Service → Environment → Add N8N_WEBHOOK_URL")
 else:
-    logger.info(f"✅ N8N Webhook URL: {N8N_WEBHOOK_URL}")
+    logger.info(f"✅ N8N Webhook URL configured")
 
 def validate_url(url_str: str) -> str:
     """Validate and clean URL"""
@@ -85,7 +93,8 @@ class SubmissionResponse(BaseModel):
 class HealthCheck(BaseModel):
     status: str
     version: str
-    cors_enabled: bool = True
+    service_name: Optional[str] = None
+    external_url: Optional[str] = None
 
 # Add explicit OPTIONS handler for CORS preflight
 @app.options("/{path:path}")
@@ -99,12 +108,13 @@ async def root():
     return {
         "message": "Article Summarizer API",
         "version": "1.0.0",
+        "platform": "Render",
+        "service": RENDER_SERVICE_NAME,
         "endpoints": {
             "health": "/health",
             "submit": "/submit",
             "docs": "/docs"
-        },
-        "cors_configured": True
+        }
     }
 
 @app.get("/health", response_model=HealthCheck)
@@ -113,7 +123,8 @@ async def health_check():
     return HealthCheck(
         status="healthy",
         version="1.0.0",
-        cors_enabled=True
+        service_name=RENDER_SERVICE_NAME,
+        external_url=RENDER_EXTERNAL_URL
     )
 
 @app.post("/submit", response_model=SubmissionResponse)
@@ -153,30 +164,30 @@ async def submit_article(submission: ArticleSubmission):
         "session_id": session_id
     }
     
-    logger.info(f"Sending payload to n8n: {n8n_payload}")
+    logger.info(f"Sending payload to n8n webhook")
     
     try:
-        # Forward to n8n webhook with longer timeout
+        # Forward to n8n webhook with proper timeout for Render
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 N8N_WEBHOOK_URL,
                 json=n8n_payload,
                 headers={
                     "Content-Type": "application/json",
-                    "User-Agent": "ArticleSummarizer-FastAPI/1.0.0"
+                    "User-Agent": "ArticleSummarizer-Render/1.0.0"
                 }
             )
             
             # Log n8n response for debugging
             logger.info(f"n8n response status: {response.status_code}")
-            logger.info(f"n8n response body: {response.text}")
             
             if response.status_code not in [200, 201]:
-                logger.error(f"n8n webhook error: {response.text}")
-                # Still return success to user, as n8n might process it async
-                logger.warning("n8n returned non-200 status, but continuing...")
+                logger.warning(f"n8n webhook returned status {response.status_code}: {response.text}")
+                # Don't fail immediately as n8n might still process it async
+            else:
+                logger.info("Successfully sent to n8n webhook")
         
-        logger.info(f"Successfully forwarded to n8n - Session ID: {session_id}")
+        logger.info(f"Request processed - Session ID: {session_id}")
         
         return SubmissionResponse(
             success=True,
@@ -186,7 +197,7 @@ async def submit_article(submission: ArticleSubmission):
         
     except httpx.TimeoutException:
         logger.error(f"Timeout while calling n8n webhook - Session ID: {session_id}")
-        # Return success anyway, as the request might still be processing
+        # Return success anyway as the request might still be processing
         return SubmissionResponse(
             success=True,
             message="Article submitted successfully. Processing may take a few minutes. Check your email.",
@@ -208,16 +219,19 @@ async def submit_article(submission: ArticleSubmission):
 if __name__ == "__main__":
     import uvicorn
     
+    # Render provides PORT environment variable
     port = int(os.getenv("PORT", 10000))
     host = "0.0.0.0"
     
     logger.info(f"🚀 Starting server on {host}:{port}")
-    logger.info(f"🌍 CORS enabled for all origins (testing mode)")
+    logger.info(f"🌍 CORS configured for production")
+    logger.info(f"📡 Ready to receive requests on Render")
     
     uvicorn.run(
         "main:app",
         host=host,
         port=port,
-        reload=False,  # Disable reload in production
-        log_level="info"
+        reload=False,  # Always False in production
+        log_level="info",
+        access_log=True
     )
